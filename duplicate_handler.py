@@ -2,15 +2,13 @@
 import hashlib
 import json
 import shutil
-from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Callable
-
+from datetime import datetime
+from typing import Dict, List, Tuple, Optional, Callable
 import mutagen
-
-from config import DUPLICATES_DIR, DUPLICATE_CHECK_FIELDS
+from config import DUPLICATES_DIR, DUPLICATE_CHECK_FIELDS, DUPLICATE_MATCH_THRESHOLD
 from logger_config import get_logger
-from progress_indicator import get_progress_indicator
+from progress_indicator import ProgressIndicator, SpinnerIndicator, SimpleProgressBar, get_progress_indicator
 
 logger = get_logger(__name__)
 duplicates_logger = get_logger('duplicates')
@@ -20,18 +18,20 @@ class DuplicateHandler:
     """Handler for detecting and processing duplicate audio files"""
 
     def __init__(self, compare_by_hash=True, compare_by_metadata=True,
-                 show_progress=True, use_tqdm=True):
+                 check_lyrics=True, show_progress=True, use_tqdm=True):
         """
         Initialize duplicate handler
 
         Args:
             compare_by_hash: Whether to compare files by hash
             compare_by_metadata: Whether to compare files by metadata
+            check_lyrics: Whether to check for lyrics presence
             show_progress: Whether to show progress indicators
             use_tqdm: Whether to use tqdm for progress (if available)
         """
         self.compare_by_hash = compare_by_hash
         self.compare_by_metadata = compare_by_metadata
+        self.check_lyrics = check_lyrics
         self.show_progress = show_progress
         self.use_tqdm = use_tqdm
         self.duplicates_found = []
@@ -198,6 +198,118 @@ class DuplicateHandler:
         # Take first 50 characters
         return f"{artist_clean[:30]}_{title_clean[:50]}"
 
+    def _has_lyrics(self, file_path: Path) -> bool:
+        """
+        Check if audio file has embedded lyrics
+
+        Args:
+            file_path: Path to audio file
+
+        Returns:
+            bool: True if lyrics are present, False otherwise
+        """
+        try:
+            extension = file_path.suffix.lower()
+
+            # MP3 files - check for USLT (Unsychronized Lyrics) or SYLT (Synchronized Lyrics)
+            if extension == '.mp3':
+                try:
+                    audio = mutagen.id3.ID3(file_path)
+                    # Check for unsynchronized lyrics
+                    if audio.get('USLT'):
+                        return True
+                    # Check for synchronized lyrics
+                    if audio.get('SYLT'):
+                        return True
+                except:
+                    pass
+
+            # FLAC, OGG, Opus files - check for 'lyrics' tag
+            elif extension in ['.flac', '.ogg', '.opus']:
+                audio = mutagen.File(file_path)
+                if audio and 'lyrics' in audio:
+                    lyrics = audio.get('lyrics')
+                    if lyrics and len(str(lyrics)) > 10:  # Some content
+                        return True
+
+            # M4A/MP4 files - check for lyrics atom
+            elif extension in ['.m4a', '.m4b']:
+                audio = mutagen.mp4.MP4(file_path)
+                # Check for lyrics atom (©lyr)
+                if audio and '\xa9lyr' in audio:
+                    lyrics = audio.get('\xa9lyr')
+                    if lyrics and len(str(lyrics)) > 10:
+                        return True
+                # Also check for iTunes lyrics
+                if audio and '----:com.apple.iTunes:lyrics' in audio:
+                    return True
+
+            # Try easy access for all formats
+            audio = mutagen.File(file_path, easy=True)
+            if audio and 'lyrics' in audio:
+                lyrics = audio.get('lyrics')
+                if lyrics and len(str(lyrics)) > 10:
+                    return True
+
+            return False
+
+        except Exception as e:
+            logger.debug(f"Error checking lyrics in {file_path.name}: {e}")
+            return False
+
+    def _extract_lyrics_text(self, file_path: Path) -> Optional[str]:
+        """
+        Extract lyrics text from audio file
+
+        Args:
+            file_path: Path to audio file
+
+        Returns:
+            str: Lyrics text or None if not found
+        """
+        try:
+            extension = file_path.suffix.lower()
+
+            # MP3 files
+            if extension == '.mp3':
+                try:
+                    audio = mutagen.id3.ID3(file_path)
+                    # Get unsynchronized lyrics
+                    uslt = audio.get('USLT')
+                    if uslt:
+                        return str(uslt)
+                    # Get synchronized lyrics
+                    sylt = audio.get('SYLT')
+                    if sylt:
+                        return str(sylt)
+                except:
+                    pass
+
+            # FLAC, OGG, Opus files
+            elif extension in ['.flac', '.ogg', '.opus']:
+                audio = mutagen.File(file_path)
+                if audio and 'lyrics' in audio:
+                    return str(audio.get('lyrics'))
+
+            # M4A/MP4 files
+            elif extension in ['.m4a', '.m4b']:
+                audio = mutagen.mp4.MP4(file_path)
+                if audio and '\xa9lyr' in audio:
+                    return str(audio.get('\xa9lyr')[0])
+                if audio and '----:com.apple.iTunes:lyrics' in audio:
+                    return str(audio.get('----:com.apple.iTunes:lyrics')[0])
+
+            # Try easy access
+            audio = mutagen.File(file_path, easy=True)
+            if audio and 'lyrics' in audio:
+                return str(audio.get('lyrics')[0])
+
+            return None
+
+        except Exception as e:
+            logger.debug(f"Error extracting lyrics from {file_path.name}: {e}")
+            return None
+
     def analyze_duplicates(self, duplicates: Dict[str, List[Path]]) -> List[Dict]:
         """
         Analyze duplicates and recommend which file to keep
@@ -230,8 +342,18 @@ class DuplicateHandler:
                     'size': path.stat().st_size,
                     'modified': datetime.fromtimestamp(path.stat().st_mtime),
                     'metadata': self._extract_metadata(path),
+                    'has_lyrics': False,
+                    'lyrics_length': 0,
                     'score': 0
                 }
+
+                # Check for lyrics
+                if self.check_lyrics:
+                    info['has_lyrics'] = self._has_lyrics(path)
+                    if info['has_lyrics']:
+                        lyrics_text = self._extract_lyrics_text(path)
+                        if lyrics_text:
+                            info['lyrics_length'] = len(lyrics_text)
 
                 # Score the file quality
                 score = 0
@@ -256,6 +378,23 @@ class DuplicateHandler:
                     if info['modified'] == newest:
                         score += 5
 
+                # 4. By lyrics presence (BIG bonus - important criterion!)
+                if self.check_lyrics:
+                    if info['has_lyrics']:
+                        # Bonus for having lyrics
+                        score += 25
+
+                        # Extra bonus for longer lyrics (more complete)
+                        if info['lyrics_length'] > 1000:
+                            score += 10  # Very long lyrics
+                        elif info['lyrics_length'] > 500:
+                            score += 5   # Medium lyrics
+                        elif info['lyrics_length'] > 100:
+                            score += 2   # Short lyrics
+                    else:
+                        # Penalty for missing lyrics (but not too harsh)
+                        score -= 5
+
                 info['score'] = score
                 files_info.append(info)
 
@@ -267,7 +406,8 @@ class DuplicateHandler:
                 'keep': files_info[0]['path'],  # recommend keeping the best one
                 'remove': [info['path'] for info in files_info[1:]],  # others to remove
                 'all_files': paths,
-                'analysis': files_info
+                'analysis': files_info,
+                'has_lyrics_keep': files_info[0]['has_lyrics'] if files_info else False
             }
 
             recommendations.append(recommendation)
@@ -278,9 +418,12 @@ class DuplicateHandler:
 
             self._update_progress(i, total_groups, f"Analyzing group {i}/{total_groups}")
 
-            # Log recommendation
+            # Log recommendation with lyrics info
             duplicates_logger.info(f"\nRecommendation for group {identifier[:50]}...")
             duplicates_logger.info(f"  Keep: {recommendation['keep']}")
+            if self.check_lyrics:
+                keep_lyrics = "Yes" if files_info[0]['has_lyrics'] else "No"
+                duplicates_logger.info(f"    Lyrics: {keep_lyrics} (length: {files_info[0]['lyrics_length']} chars)")
             for remove_file in recommendation['remove']:
                 duplicates_logger.info(f"  Remove: {remove_file}")
 
@@ -339,7 +482,8 @@ class DuplicateHandler:
                             'original_path': str(remove_file),
                             'original_name': remove_file.name,
                             'reason': f"Duplicate of {rec['keep'].name}",
-                            'timestamp': timestamp
+                            'timestamp': timestamp,
+                            'has_lyrics': self._has_lyrics(remove_file) if self.check_lyrics else False
                         }, f, indent=2, ensure_ascii=False)
 
                     # Move file
@@ -355,7 +499,7 @@ class DuplicateHandler:
                         progress.update(moved_count)
 
                     self._update_progress(moved_count, total_to_move,
-                                          f"Moving: {remove_file.name}")
+                                        f"Moving: {remove_file.name}")
 
                 except Exception as e:
                     logger.error(f"Error moving {remove_file}: {e}")
@@ -415,8 +559,11 @@ class DuplicateHandler:
         .badge {{ display: inline-block; padding: 3px 8px; border-radius: 3px; font-size: 12px; font-weight: bold; }}
         .badge-keep {{ background: #28a745; color: white; }}
         .badge-remove {{ background: #dc3545; color: white; }}
+        .badge-lyrics {{ background: #17a2b8; color: white; }}
+        .badge-no-lyrics {{ background: #6c757d; color: white; }}
         .file-details {{ margin-left: 20px; }}
         .metadata {{ font-size: 12px; color: #666; margin-left: 20px; }}
+        .lyrics-info {{ font-size: 13px; margin-left: 20px; }}
     </style>
 </head>
 <body>
@@ -427,6 +574,7 @@ class DuplicateHandler:
         <p><strong>Total files in groups:</strong> {total_files}</p>
         <p><strong>Recommended to keep:</strong> {keep_files}</p>
         <p><strong>Recommended to remove:</strong> {remove_files}</p>
+        <p><strong>Files with lyrics (kept):</strong> {keep_with_lyrics}</p>
     </div>
 """
 
@@ -434,24 +582,34 @@ class DuplicateHandler:
         total_files = sum(len(rec['all_files']) for rec in recommendations)
         keep_files = len(recommendations)
         remove_files = sum(len(rec['remove']) for rec in recommendations)
+        keep_with_lyrics = sum(1 for rec in recommendations if rec.get('has_lyrics_keep', False))
 
         html = html.format(
             timestamp=timestamp,
             total_groups=len(recommendations),
             total_files=total_files,
             keep_files=keep_files,
-            remove_files=remove_files
+            remove_files=remove_files,
+            keep_with_lyrics=keep_with_lyrics
         )
 
         for i, rec in enumerate(recommendations, 1):
             # Information about file recommended to keep
             keep_info = next(f for f in rec['analysis'] if f['path'] == rec['keep'])
 
+            # Lyrics badge for keep file
+            lyrics_badge = ""
+            if self.check_lyrics and keep_info.get('has_lyrics', False):
+                lyrics_badge = f"<span class='badge badge-lyrics'>🎤 Has Lyrics ({keep_info.get('lyrics_length', 0)} chars)</span>"
+            elif self.check_lyrics:
+                lyrics_badge = "<span class='badge badge-no-lyrics'>No Lyrics</span>"
+
             html += f"""
     <div class="duplicate-group">
         <h3>Duplicate Group #{i}</h3>
         <div class="keep">
             <strong>✅ Keep:</strong>
+            {lyrics_badge}
             <div class="file-details">
                 <div class="file-info">📁 {rec['keep']}</div>
                 <div class="file-info">📦 Size: {rec['keep'].stat().st_size:,} bytes ({rec['keep'].stat().st_size / 1024 / 1024:.2f} MB)</div>
@@ -460,6 +618,7 @@ class DuplicateHandler:
                     <strong>Metadata:</strong>
                     {self._format_metadata(keep_info['metadata'])}
                 </div>
+                {self._format_lyrics_info(keep_info) if self.check_lyrics else ''}
             </div>
         </div>
         <div style="margin-top: 15px;">
@@ -468,16 +627,26 @@ class DuplicateHandler:
 
             for remove_file in rec['remove']:
                 remove_info = next(f for f in rec['analysis'] if f['path'] == remove_file)
+
+                # Lyrics badge for remove files
+                remove_lyrics_badge = ""
+                if self.check_lyrics and remove_info.get('has_lyrics', False):
+                    remove_lyrics_badge = f"<span class='badge badge-lyrics'>🎤 Has Lyrics ({remove_info.get('lyrics_length', 0)} chars)</span>"
+                elif self.check_lyrics:
+                    remove_lyrics_badge = "<span class='badge badge-no-lyrics'>No Lyrics</span>"
+
                 html += f"""
             <div class="remove">
                 <div class="file-details">
                     <div class="file-info">📁 {remove_file}</div>
                     <div class="file-info">📦 Size: {remove_file.stat().st_size:,} bytes ({remove_file.stat().st_size / 1024 / 1024:.2f} MB)</div>
                     <div class="file-info">⭐ Quality score: {remove_info['score']}</div>
+                    {remove_lyrics_badge}
                     <div class="metadata">
                         <strong>Metadata:</strong>
                         {self._format_metadata(remove_info['metadata'])}
                     </div>
+                    {self._format_lyrics_info(remove_info) if self.check_lyrics else ''}
                 </div>
             </div>
             """
@@ -493,6 +662,7 @@ class DuplicateHandler:
         <ol>
             <li>Verify that all files marked as "Keep" are indeed the best versions</li>
             <li>Files marked as "Remove" are duplicates and can be safely deleted</li>
+            <li><strong>Lyrics criterion:</strong> Files with embedded lyrics are given higher priority</li>
             <li>If you used the --quarantine option, duplicates have been moved to the quarantine folder</li>
             <li>After verification, you can delete files from quarantine</li>
         </ol>
@@ -520,6 +690,27 @@ class DuplicateHandler:
             return "<span style='color: #999;'>No data</span>"
 
         return " ".join(items)
+
+    def _format_lyrics_info(self, file_info: Dict) -> str:
+        """Format lyrics information for HTML display"""
+        if not self.check_lyrics:
+            return ""
+
+        has_lyrics = file_info.get('has_lyrics', False)
+        lyrics_length = file_info.get('lyrics_length', 0)
+
+        if has_lyrics:
+            return f"""
+                <div class="lyrics-info">
+                    <strong>🎤 Lyrics:</strong> Present ({lyrics_length} characters)
+                </div>
+            """
+        else:
+            return """
+                <div class="lyrics-info">
+                    <strong>🎤 Lyrics:</strong> Not found
+                </div>
+            """
 
     def process_with_full_progress(self, files: List[Path],
                                    quarantine: bool = False,
@@ -563,6 +754,7 @@ class DuplicateHandler:
         total_files = sum(len(rec['all_files']) for rec in recommendations)
         keep_files = len(recommendations)
         remove_files = sum(len(rec['remove']) for rec in recommendations)
+        keep_with_lyrics = sum(1 for rec in recommendations if rec.get('has_lyrics_keep', False))
 
         result = {
             'duplicates_found': True,
@@ -570,6 +762,7 @@ class DuplicateHandler:
             'total_files': total_files,
             'keep_files': keep_files,
             'remove_files': remove_files,
+            'keep_with_lyrics': keep_with_lyrics,
             'recommendations': recommendations,
             'report_path': report_path,
             'moved_to_quarantine': len(moved_files),
