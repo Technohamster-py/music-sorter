@@ -1,22 +1,21 @@
 """Module for organizing files into folders by metadata"""
 import shutil
 from pathlib import Path
-from typing import Dict, Callable
-
+from datetime import datetime
+from typing import List, Dict, Optional, Callable
 import mutagen
-
 from config import ORGANIZE_PATTERN, DEFAULT_ARTIST, DEFAULT_ALBUM
-from duplicate_handler import DuplicateHandler
 from logger_config import get_logger
-from progress_indicator import get_progress_indicator
+from duplicate_handler import DuplicateHandler
+from progress_indicator import get_progress_indicator, ProgressWithLogging
 
 logger = get_logger(__name__)
 
 
 class FileOrganizer:
     """Class for organizing music files into folders"""
-
-    def __init__(self, dry_run=False, backup=True, show_progress=True, use_tqdm=True):
+    def __init__(self, dry_run=False, backup=True, show_progress=True, use_tqdm=True,
+                 check_lyrics=True):
         """
         Initialize file organizer
 
@@ -25,12 +24,15 @@ class FileOrganizer:
             backup: If True, create backup files before modifying
             show_progress: If True, show progress indicators
             use_tqdm: If True, use tqdm for progress (if available)
+            check_lyrics: If True, check for lyrics presence in duplicates
         """
         self.dry_run = dry_run
         self.backup = backup
         self.show_progress = show_progress
         self.use_tqdm = use_tqdm
+        self.check_lyrics = check_lyrics
         self.duplicate_handler = DuplicateHandler(
+            check_lyrics=check_lyrics,
             show_progress=show_progress,
             use_tqdm=use_tqdm
         )
@@ -54,8 +56,7 @@ class FileOrganizer:
         if self.progress_callback:
             self.progress_callback(current, total, description)
 
-    def organize_by_metadata(self, source_dir: Path, target_dir: Path,
-                             handle_duplicates: bool = True) -> Dict:
+    def organize_by_metadata(self, source_dir: Path, target_dir: Path, handle_duplicates: bool = True) -> Dict:
         """
         Organize files by metadata
 
@@ -81,6 +82,8 @@ class FileOrganizer:
         # Handle duplicates if requested
         if handle_duplicates:
             logger.info("Searching for duplicates...")
+            if self.check_lyrics:
+                logger.info("Lyrics check is enabled (bonus for files with lyrics)")
 
             # Use progress indicator for duplicate search
             if self.show_progress:
@@ -94,6 +97,8 @@ class FileOrganizer:
                 # Analyze duplicates
                 if self.show_progress:
                     print("  Analyzing duplicates...")
+                    if self.check_lyrics:
+                        print("  🎤 Checking for embedded lyrics...")
 
                 recommendations = self.duplicate_handler.analyze_duplicates(duplicates)
 

@@ -1,12 +1,12 @@
 """Command-line interface for the music metadata utility"""
 import argparse
 import sys
-import time
 from pathlib import Path
+
 from audio_processor import AudioProcessor
 from file_organizer import FileOrganizer
 from logger_config import get_logger
-from progress_indicator import SpinnerIndicator, SimpleProgressBar, progress
+from progress_indicator import SpinnerIndicator, SimpleProgressBar
 
 logger = get_logger(__name__)
 
@@ -17,41 +17,42 @@ def main():
         description='Music Metadata Tool - Process and organize audio files',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-Examples:
-  # Set artist for all files in a folder
-  python cli.py set-metadata -f /path/to/music -a "The Beatles"
-  
-  # Set artist and album
-  python cli.py set-metadata -f /path/to/music -a "Nirvana" -b "Nevermind"
-  
-  # Set full metadata
-  python cli.py set-metadata -f /path/to/music -a "Pink Floyd" -b "The Wall" -y 1979
-  
-  # Use filenames as titles
-  python cli.py set-metadata -f /path/to/music --title-from-filename
-  
-  # Organize files into folders (artist/album)
-  python cli.py organize -s /path/to/source -t /path/to/target
-  
-  # Find and process duplicates
-  python cli.py find-duplicates -f /path/to/music
-  
-  # Preview mode (dry run)
-  python cli.py set-metadata -f /path/to/music -a "Queen" --dry-run
-  
-  # Legacy command (still works)
-  python cli.py set-artist -f /path/to/music -a "The Beatles"
-  
-  # Disable progress bar (for scripts)
-  python cli.py set-metadata -f /path/to/music -a "Queen" --no-progress
-        """
+    Examples:
+      # Set artist for all files in a folder
+      python cli.py set-metadata -f /path/to/music -a "The Beatles"
+      
+      # Set artist and album
+      python cli.py set-metadata -f /path/to/music -a "Nirvana" -b "Nevermind"
+      
+      # Set full metadata
+      python cli.py set-metadata -f /path/to/music -a "Pink Floyd" -b "The Wall" -y 1979
+      
+      # Use filenames as titles
+      python cli.py set-metadata -f /path/to/music --title-from-filename
+      
+      # Organize files into folders (artist/album)
+      python cli.py organize -s /path/to/source -t /path/to/target
+      
+      # Find and process duplicates (with lyrics check by default)
+      python cli.py find-duplicates -f /path/to/music
+      
+      # Find duplicates without lyrics check
+      python cli.py find-duplicates -f /path/to/music --no-lyrics
+      
+      # Preview mode (dry run)
+      python cli.py set-metadata -f /path/to/music -a "Queen" --dry-run
+      
+      # Legacy command (still works)
+      python cli.py set-artist -f /path/to/music -a "The Beatles"
+      
+      # Disable progress bar (for scripts)
+      python cli.py set-metadata -f /path/to/music -a "Queen" --no-progress
+            """
     )
 
     # Global options for all commands
-    parser.add_argument('--no-progress', action='store_true',
-                       help='Disable progress indicators')
-    parser.add_argument('--no-tqdm', action='store_true',
-                       help='Use simple progress bar instead of tqdm')
+    parser.add_argument('--no-progress', action='store_true', help='Disable progress indicators')
+    parser.add_argument('--no-tqdm', action='store_true', help='Use simple progress bar instead of tqdm')
 
     subparsers = parser.add_subparsers(dest='command', help='Command to execute')
 
@@ -63,16 +64,18 @@ Examples:
     set_metadata_parser.add_argument('-t', '--title', help='Title to set')
     set_metadata_parser.add_argument('-y', '--year', help='Year to set')
     set_metadata_parser.add_argument('-n', '--track', type=int, help='Track number to set')
-    set_metadata_parser.add_argument('--title-from-filename', action='store_true', help='Use filename (without extension) as title')
-    set_metadata_parser.add_argument('-r', '--recursive', action='store_true', help='Process subdirectories recursively')
+    set_metadata_parser.add_argument('--title-from-filename', action='store_true',
+                                     help='Use filename (without extension) as title')
+    set_metadata_parser.add_argument('-r', '--recursive', action='store_true',
+                                     help='Process subdirectories recursively')
     set_metadata_parser.add_argument('--dry-run', action='store_true', help='Preview changes without applying them')
     set_metadata_parser.add_argument('--no-backup', action='store_true', help='Skip creating backup files')
     set_metadata_parser.add_argument('--spinner', action='store_true', help='Use spinner instead of progress bar')
 
     # Command: set-artist (legacy, kept for backward compatibility)
     set_artist_parser = subparsers.add_parser('set-artist', help='Set artist for audio files (legacy)')
-    set_artist_parser.add_argument('-f', '--folder', required=True,  help='Path to folder with music')
-    set_artist_parser.add_argument('-a', '--artist', required=True,  help='Artist name to set')
+    set_artist_parser.add_argument('-f', '--folder', required=True, help='Path to folder with music')
+    set_artist_parser.add_argument('-a', '--artist', required=True, help='Artist name to set')
     set_artist_parser.add_argument('-r', '--recursive', action='store_true', help='Process subdirectories recursively')
     set_artist_parser.add_argument('--dry-run', action='store_true', help='Preview changes without applying them')
     set_artist_parser.add_argument('--no-backup', action='store_true', help='Skip creating backup files')
@@ -85,12 +88,15 @@ Examples:
     organize_parser.add_argument('--no-duplicates', action='store_true', help='Skip duplicate handling')
     organize_parser.add_argument('--dry-run', action='store_true', help='Preview changes without applying them')
     organize_parser.add_argument('--no-backup', action='store_true', help='Skip creating backup files')
+    organize_parser.add_argument('--no-lyrics', action='store_true', help='Disable lyrics check when handling duplicates (enabled by default)')
 
     # Command: find-duplicates
-    duplicates_parser = subparsers.add_parser('find-duplicates',  help='Find duplicate files')
+    duplicates_parser = subparsers.add_parser('find-duplicates', help='Find duplicate files')
     duplicates_parser.add_argument('-f', '--folder', required=True, help='Path to folder')
     duplicates_parser.add_argument('--report', help='Save report to specific file')
     duplicates_parser.add_argument('--quarantine', action='store_true', help='Move duplicates to quarantine')
+    duplicates_parser.add_argument('--no-lyrics', action='store_true',
+                                   help='Disable lyrics presence check (enabled by default)')
 
     # Command: clean-backups
     clean_parser = subparsers.add_parser('clean-backups', help='Remove backup files')
@@ -274,7 +280,8 @@ def cmd_organize(args):
         dry_run=args.dry_run,
         backup=not args.no_backup,
         show_progress=not args.no_progress,
-        use_tqdm=not args.no_tqdm
+        use_tqdm=not args.no_tqdm,
+        check_lyrics = not args.no_lyrics
     )
 
     result = organizer.organize_by_metadata(
@@ -306,13 +313,17 @@ def cmd_find_duplicates(args):
         logger.error(f"Folder does not exist: {folder}")
         sys.exit(1)
 
+    # Show lyrics status
+    lyrics_status = "disabled" if args.no_lyrics else "enabled"
     print(f"\n🔍 Searching for duplicates in: {folder}")
+    print(f"📝 Lyrics check: {lyrics_status}")
 
     from duplicate_handler import DuplicateHandler
 
     handler = DuplicateHandler(
+        check_lyrics=not args.no_lyrics,  # Enabled by default, disabled with --no-lyrics
         show_progress=not args.no_progress,
-        use_tqdm=not args.no_tqdm
+        use_tqdm=not args.no_tqdm,
     )
 
     # Find all audio files
@@ -340,6 +351,8 @@ def cmd_find_duplicates(args):
 
     # Analyze duplicates
     print("  📊 Analyzing duplicates...")
+    if not args.no_lyrics:
+        print("  🎤 Checking for embedded lyrics (bonus for files with lyrics)...")
     recommendations = handler.analyze_duplicates(duplicates)
 
     # Save report
@@ -362,10 +375,15 @@ def cmd_find_duplicates(args):
     keep_files = len(recommendations)
     remove_files = sum(len(rec['remove']) for rec in recommendations)
 
+    # Show lyrics statistics if enabled
     print(f"\n📊 Duplicate statistics:")
     print(f"  📁 Total files in groups: {total_files}")
     print(f"  ✅ Recommended to keep: {keep_files}")
     print(f"  ❌ Recommended to remove: {remove_files}")
+
+    if not args.no_lyrics:
+        keep_with_lyrics = sum(1 for rec in recommendations if rec.get('has_lyrics_keep', False))
+        print(f"  🎤 Keep files with lyrics: {keep_with_lyrics} / {keep_files}")
 
     if args.quarantine:
         print(f"\n📦 Duplicates moved to quarantine in: logs/duplicates/quarantine")
