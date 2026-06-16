@@ -26,7 +26,7 @@ class DuplicateHandler:
         for file_path in files:
             info = self._get_file_identifier(file_path)
             if info:
-                file_info[str[file_path]] = info
+                file_info[str(file_path)] = info
 
         from collections import defaultdict
         grouped = defaultdict(list)
@@ -228,14 +228,14 @@ class DuplicateHandler:
             <meta charset="UTF-8">
             <title>Report on duplicate audio files</title>
             <style>
-                body { font-family: Arial, sans-serif; margin: 20px; }
-                .duplicate-group { border: 1px solid #ddd; margin: 20px 0; padding: 15px; border-radius: 5px; }
-                .keep { background-color: #d4edda; border-left: 4px solid #28a745; }
-                .remove { background-color: #f8d7da; border-left: 4px solid #dc3545; margin: 10px 0; padding: 10px; }
-                .file-info { margin: 5px 0; font-family: monospace; }
-                .score { font-weight: bold; }
-                h1 { color: #333; }
-                h3 { margin-top: 0; }
+                body {{ font-family: Arial, sans-serif; margin: 20px; }}
+                .duplicate-group {{ border: 1px solid #ddd; margin: 20px 0; padding: 15px; border-radius: 5px; }}
+                .keep {{ background-color: #d4edda; border-left: 4px solid #28a745; }}
+                .remove {{ background-color: #f8d7da; border-left: 4px solid #dc3545; margin: 10px 0; padding: 10px; }}
+                .file-info {{ margin: 5px 0; font-family: monospace; }}
+                .score {{ font-weight: bold; }}
+                h1 {{ color: #333; }}
+                h3 {{ margin-top: 0; }}
             </style>
         </head>
         <body>

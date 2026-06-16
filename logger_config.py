@@ -26,7 +26,7 @@ def setup_logging():
     console_handler.setFormatter(console_formatter)
     root_logger.addHandler(console_handler)
 
-    duplicates_logger = logging.getlogger('duplicates')
+    duplicates_logger = logging.getLogger('duplicates')
     duplicates_logger.setLevel(logging.INFO)
     duplicates_logger.propagate = False
 
