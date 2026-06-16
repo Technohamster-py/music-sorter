@@ -1,12 +1,12 @@
 """Command-line interface for the music metadata utility"""
 import argparse
 import sys
+import time
 from pathlib import Path
-
 from audio_processor import AudioProcessor
 from file_organizer import FileOrganizer
 from logger_config import get_logger
-from progress_indicator import SpinnerIndicator, SimpleProgressBar
+from progress_indicator import SpinnerIndicator, SimpleProgressBar, progress
 
 logger = get_logger(__name__)
 
@@ -19,7 +19,16 @@ def main():
         epilog="""
 Examples:
   # Set artist for all files in a folder
-  python cli.py set-artist -f /path/to/music -a "The Beatles"
+  python cli.py set-metadata -f /path/to/music -a "The Beatles"
+  
+  # Set artist and album
+  python cli.py set-metadata -f /path/to/music -a "Nirvana" -b "Nevermind"
+  
+  # Set full metadata
+  python cli.py set-metadata -f /path/to/music -a "Pink Floyd" -b "The Wall" -y 1979
+  
+  # Use filenames as titles
+  python cli.py set-metadata -f /path/to/music --title-from-filename
   
   # Organize files into folders (artist/album)
   python cli.py organize -s /path/to/source -t /path/to/target
@@ -28,23 +37,42 @@ Examples:
   python cli.py find-duplicates -f /path/to/music
   
   # Preview mode (dry run)
-  python cli.py organize -s /path/to/source -t /path/to/target --dry-run
+  python cli.py set-metadata -f /path/to/music -a "Queen" --dry-run
+  
+  # Legacy command (still works)
+  python cli.py set-artist -f /path/to/music -a "The Beatles"
   
   # Disable progress bar (for scripts)
-  python cli.py set-artist -f /path/to/music -a "Queen" --no-progress
+  python cli.py set-metadata -f /path/to/music -a "Queen" --no-progress
         """
     )
 
     # Global options for all commands
-    parser.add_argument('--no-progress', action='store_true', help='Disable progress indicators')
-    parser.add_argument('--no-tqdm', action='store_true', help='Use simple progress bar instead of tqdm')
+    parser.add_argument('--no-progress', action='store_true',
+                       help='Disable progress indicators')
+    parser.add_argument('--no-tqdm', action='store_true',
+                       help='Use simple progress bar instead of tqdm')
 
     subparsers = parser.add_subparsers(dest='command', help='Command to execute')
 
-    # Command: set-artist
-    set_artist_parser = subparsers.add_parser('set-artist', help='Set artist for audio files')
-    set_artist_parser.add_argument('-f', '--folder', required=True, help='Path to folder with music')
-    set_artist_parser.add_argument('-a', '--artist', required=True, help='Artist name to set')
+    # Command: set-metadata (NEW - more powerful)
+    set_metadata_parser = subparsers.add_parser('set-metadata', help='Set metadata for audio files')
+    set_metadata_parser.add_argument('-f', '--folder', required=True, help='Path to folder with music')
+    set_metadata_parser.add_argument('-a', '--artist', help='Artist name to set')
+    set_metadata_parser.add_argument('-b', '--album', help='Album name to set')
+    set_metadata_parser.add_argument('-t', '--title', help='Title to set')
+    set_metadata_parser.add_argument('-y', '--year', help='Year to set')
+    set_metadata_parser.add_argument('-n', '--track', type=int, help='Track number to set')
+    set_metadata_parser.add_argument('--title-from-filename', action='store_true', help='Use filename (without extension) as title')
+    set_metadata_parser.add_argument('-r', '--recursive', action='store_true', help='Process subdirectories recursively')
+    set_metadata_parser.add_argument('--dry-run', action='store_true', help='Preview changes without applying them')
+    set_metadata_parser.add_argument('--no-backup', action='store_true', help='Skip creating backup files')
+    set_metadata_parser.add_argument('--spinner', action='store_true', help='Use spinner instead of progress bar')
+
+    # Command: set-artist (legacy, kept for backward compatibility)
+    set_artist_parser = subparsers.add_parser('set-artist', help='Set artist for audio files (legacy)')
+    set_artist_parser.add_argument('-f', '--folder', required=True,  help='Path to folder with music')
+    set_artist_parser.add_argument('-a', '--artist', required=True,  help='Artist name to set')
     set_artist_parser.add_argument('-r', '--recursive', action='store_true', help='Process subdirectories recursively')
     set_artist_parser.add_argument('--dry-run', action='store_true', help='Preview changes without applying them')
     set_artist_parser.add_argument('--no-backup', action='store_true', help='Skip creating backup files')
@@ -59,7 +87,7 @@ Examples:
     organize_parser.add_argument('--no-backup', action='store_true', help='Skip creating backup files')
 
     # Command: find-duplicates
-    duplicates_parser = subparsers.add_parser('find-duplicates', help='Find duplicate files')
+    duplicates_parser = subparsers.add_parser('find-duplicates',  help='Find duplicate files')
     duplicates_parser.add_argument('-f', '--folder', required=True, help='Path to folder')
     duplicates_parser.add_argument('--report', help='Save report to specific file')
     duplicates_parser.add_argument('--quarantine', action='store_true', help='Move duplicates to quarantine')
@@ -75,7 +103,9 @@ Examples:
         sys.exit(1)
 
     try:
-        if args.command == 'set-artist':
+        if args.command == 'set-metadata':
+            cmd_set_metadata(args)
+        elif args.command == 'set-artist':
             cmd_set_artist(args)
         elif args.command == 'organize':
             cmd_organize(args)
@@ -97,8 +127,84 @@ Examples:
         sys.exit(1)
 
 
+def cmd_set_metadata(args):
+    """Handle set-metadata command"""
+    folder = Path(args.folder)
+    if not folder.exists():
+        print(f"❌ Folder does not exist: {folder}")
+        logger.error(f"Folder does not exist: {folder}")
+        sys.exit(1)
+
+    # Build description of changes
+    changes = []
+    if args.artist: changes.append(f"artist='{args.artist}'")
+    if args.album: changes.append(f"album='{args.album}'")
+    if args.title: changes.append(f"title='{args.title}'")
+    if args.year: changes.append(f"year='{args.year}'")
+    if args.track is not None: changes.append(f"track={args.track}")
+    if args.title_from_filename: changes.append("title=filename")
+
+    if not changes:
+        print("❌ No metadata changes specified. Use -a, -b, -t, -y, -n, or --title-from-filename")
+        sys.exit(1)
+
+    print(f"\n🎵 Processing folder: {folder}")
+    print(f"📝 Changes: {', '.join(changes)}")
+    if args.dry_run:
+        print("🔍 DRY RUN MODE (changes will not be applied)")
+
+    processor = AudioProcessor(
+        dry_run=args.dry_run,
+        backup=not args.no_backup,
+        show_progress=not args.no_progress,
+        use_tqdm=not args.no_tqdm
+    )
+
+    if args.spinner:
+        processed, errors = processor.set_metadata_with_spinner(
+            folder_path=folder,
+            artist=args.artist,
+            album=args.album,
+            title=args.title,
+            year=args.year,
+            track=args.track,
+            use_filename_as_title=args.title_from_filename,
+            recursive=args.recursive
+        )
+    else:
+        processed, errors = processor.set_metadata_in_folder(
+            folder_path=folder,
+            artist=args.artist,
+            album=args.album,
+            title=args.title,
+            year=args.year,
+            track=args.track,
+            use_filename_as_title=args.title_from_filename,
+            recursive=args.recursive
+        )
+
+    # Display results
+    print(f"\n📊 Results:")
+    print(f"  ✅ Successfully processed: {processed}")
+    if errors > 0:
+        print(f"  ❌ Errors: {errors}")
+    if args.dry_run:
+        print("  🔍 Mode: DRY RUN (changes not applied)")
+
+    if not args.dry_run and processor.backup_files:
+        print(f"\n💾 Created {len(processor.backup_files)} backup files")
+        print("   To remove backups: python cli.py clean-backups -f <folder>")
+
+    if errors == 0 and processed > 0:
+        print("\n✅ Operation completed successfully!")
+    elif errors > 0:
+        print(f"\n⚠️  Operation completed with {errors} errors. Check the log.")
+
+
 def cmd_set_artist(args):
-    """Handle set-artist command"""
+    """Handle set-artist command (legacy)"""
+    print("ℹ️  Note: 'set-artist' is a legacy command. Use 'set-metadata' for more features.")
+
     folder = Path(args.folder)
     if not folder.exists():
         print(f"❌ Folder does not exist: {folder}")
@@ -213,7 +319,7 @@ def cmd_find_duplicates(args):
     print("  📂 Scanning files...")
     with SpinnerIndicator("Searching for audio files") as spinner:
         audio_files = [f for f in folder.rglob('*')
-                       if f.suffix.lower() in {'.mp3', '.flac', '.m4a', '.ogg', '.opus'}]
+                      if f.suffix.lower() in {'.mp3', '.flac', '.m4a', '.ogg', '.opus'}]
         spinner.update(len(audio_files))
 
     if not audio_files:
