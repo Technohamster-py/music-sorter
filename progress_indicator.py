@@ -82,15 +82,17 @@ class SimpleProgressBar(ProgressIndicator):
         filled = int(self.width * progress)
         bar = "█" * filled + "░" * (self.width - filled)
 
+
+
         if self.show_percentage:
             percentage = progress * 100
             percentage_str = f"{percentage:5.1f}%"
-        else:
-            progress_str = f"{self.current}/{self.total}"
+
+        progress_str = f"{self.current}/{self.total}"
 
         eta = self.get_eta()
 
-        sys.stdout.write('\r' + ' ' * len(self._last_display))
+        sys.stdout.write('\r' + ' ' * len(self.last_display))
         sys.stdout.write('\r')
 
         # Формируем вывод
