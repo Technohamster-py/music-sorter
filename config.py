@@ -1,31 +1,39 @@
+"""Configuration for the music metadata utility"""
 import os
 from pathlib import Path
-from datetime import datetime
 
+# Base paths
 BASE_DIR = Path(__file__).parent
 LOGS_DIR = BASE_DIR / "logs"
-DUPLICATES_DIR = BASE_DIR / "duplicates"
+DUPLICATES_DIR = LOGS_DIR / "duplicates"
 
+# Create required directories
 LOGS_DIR.mkdir(exist_ok=True)
 DUPLICATES_DIR.mkdir(exist_ok=True)
 
+# Logging settings
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 LOG_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 LOG_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
+# Log files
 PROCESSING_LOG = LOGS_DIR / "processing.log"
 DUPLICATES_LOG = LOGS_DIR / "duplicates.log"
 ERRORS_LOG = LOGS_DIR / "errors.log"
 
+# Processing settings
 AUDIO_EXTENSIONS = {'.mp3', '.flac', '.m4a', '.m4b', '.ogg', '.opus', '.wma', '.aac'}
 
-DUPLICATE_CHECK_FIELDS = ['title', 'artist', 'duration']
-DUPLICATE_MATCH_THRESHOLD = 0.9
+# Duplicate detection settings
+DUPLICATE_CHECK_FIELDS = ['title', 'artist', 'duration']  # Fields to compare
+DUPLICATE_MATCH_THRESHOLD = 0.9  # Similarity threshold for fuzzy matching
 
-ORGANIZE_PATTERN = "{artist}/{album}/{track:02d} - {title}{ext}"
+# Organization settings
+ORGANIZE_PATTERN = "{artist}/{album}/{track:02d} - {title}{ext}"  # Path pattern
 DEFAULT_ARTIST = "Unknown Artist"
 DEFAULT_ALBUM = "Unknown Album"
 
+# Tag mappings for different formats
 TAG_MAPPING = {
     'mp3': {
         'artist': 'TPE1',

@@ -1,79 +1,152 @@
-import  hashlib
+"""Module for detecting and handling duplicate audio files"""
+import hashlib
 import json
 import shutil
-from pathlib import Path
 from datetime import datetime
-from difflib import SequenceMatcher
-from typing import Dict, List, Tuple, Optional
-import mutagen
-from pip._internal.operations.build import metadata
+from pathlib import Path
+from typing import Dict, List, Optional, Callable
 
-from config import DUPLICATES_DIR, DUPLICATE_CHECK_FIELDS, DUPLICATE_MATCH_THRESHOLD
-from logger_config import get_logger, duplicates_logger
+import mutagen
+
+from config import DUPLICATES_DIR, DUPLICATE_CHECK_FIELDS
+from logger_config import get_logger
+from progress_indicator import get_progress_indicator
 
 logger = get_logger(__name__)
-duplicates_logger = get_logger("duplicates")
+duplicates_logger = get_logger('duplicates')
+
 
 class DuplicateHandler:
-    def __init__(self, compare_by_hash: bool = True, compare_by_metadata: bool = True):
+    """Handler for detecting and processing duplicate audio files"""
+
+    def __init__(self, compare_by_hash=True, compare_by_metadata=True,
+                 show_progress=True, use_tqdm=True):
+        """
+        Initialize duplicate handler
+
+        Args:
+            compare_by_hash: Whether to compare files by hash
+            compare_by_metadata: Whether to compare files by metadata
+            show_progress: Whether to show progress indicators
+            use_tqdm: Whether to use tqdm for progress (if available)
+        """
         self.compare_by_hash = compare_by_hash
         self.compare_by_metadata = compare_by_metadata
+        self.show_progress = show_progress
+        self.use_tqdm = use_tqdm
         self.duplicates_found = []
+        self.progress_callback = None
+
+    def set_progress_callback(self, callback: Callable[[int, int, str], None]):
+        """
+        Set callback for progress updates
+
+        Args:
+            callback: Function accepting (current, total, description)
+        """
+        self.progress_callback = callback
+
+    def _update_progress(self, current: int, total: int, description: str = ""):
+        """Update progress via callback if set"""
+        if self.progress_callback:
+            self.progress_callback(current, total, description)
 
     def find_duplicates(self, files: List[Path]) -> Dict[str, List[Path]]:
-        file_info = {}
+        """
+        Find duplicates among a list of files
 
-        for file_path in files:
+        Returns:
+            Dictionary: key - duplicate identifier, value - list of paths
+        """
+        logger.info(f"Finding duplicates among {len(files)} files")
+
+        file_info = {}
+        total_files = len(files)
+
+        # Create progress indicator
+        if self.show_progress:
+            progress = get_progress_indicator(
+                total_files,
+                "Scanning files for duplicates",
+                self.use_tqdm
+            )
+        else:
+            progress = None
+
+        # Process each file
+        for i, file_path in enumerate(files, 1):
+            # Get file identifier
             info = self._get_file_identifier(file_path)
             if info:
                 file_info[str(file_path)] = info
 
+            # Update progress
+            if progress:
+                progress.update(i)
+
+            self._update_progress(i, total_files, f"Scanning: {file_path.name}")
+
+        if progress:
+            progress.finish()
+
+        # Group by identifiers
         from collections import defaultdict
         grouped = defaultdict(list)
+
         for path, identifier in file_info.items():
             grouped[identifier].append(Path(path))
 
+        # Keep only groups with duplicates (more than 1 file)
         duplicates = {k: v for k, v in grouped.items() if len(v) > 1}
+
+        # Save found duplicates
         self.duplicates_found = duplicates
 
+        # Log results
         if duplicates:
             duplicates_logger.info(f"Found {len(duplicates)} duplicate groups:")
             for identifier, paths in duplicates.items():
                 duplicates_logger.info(f"  Group: {identifier[:100]}...")
                 for path in paths:
-                    duplicates_logger.info(f"        - {path}")
+                    duplicates_logger.info(f"    - {path}")
 
+        logger.info(f"Found {len(duplicates)} duplicate groups")
         return duplicates
 
-
     def _get_file_identifier(self, file_path: Path) -> Optional[str]:
+        """Get unique identifier for a file"""
         identifiers = []
 
+        # 1. Compare by file hash (most accurate)
         if self.compare_by_hash:
             file_hash = self._calculate_file_hash(file_path)
             if file_hash:
                 identifiers.append(f"hash_{file_hash}")
 
+        # 2. Compare by metadata
         if self.compare_by_metadata:
             metadata = self._extract_metadata(file_path)
             if metadata:
+                # Create key based on important fields
                 key_parts = []
                 for field in DUPLICATE_CHECK_FIELDS:
                     if field in metadata and metadata[field]:
                         key_parts.append(f"{field}={metadata[field]}")
 
                 if key_parts:
-                    identifiers.append("||".join(key_parts))
+                    identifiers.append("|".join(key_parts))
 
+                # Also try fuzzy comparison of titles
                 if 'title' in metadata and 'artist' in metadata:
                     fuzzy_key = self._create_fuzzy_key(metadata['title'], metadata['artist'])
                     identifiers.append(f"fuzzy_{fuzzy_key}")
 
+        # Return first found identifier (priority: hash > metadata)
         for identifier in identifiers:
-            if identifier.startswith("hash_"):
+            if identifier.startswith('hash_'):
                 return identifier
         for identifier in identifiers:
-            if identifier.startswith("fuzzy_"):
+            if identifier.startswith('fuzzy_'):
                 return identifier
         for identifier in identifiers:
             if identifier:
@@ -81,20 +154,23 @@ class DuplicateHandler:
 
         return None
 
-    def _calculate_file_hash(self, file_path: Path, algorithm="md5") -> Optional[str]:
+    def _calculate_file_hash(self, file_path: Path, algorithm='md5') -> Optional[str]:
+        """Calculate file hash"""
         try:
-            has_func = hashlib.new(algorithm)
-            with file_path.open('rb') as f:
-                for chunk in iter(lambda: f.read(1024*1024), b''):
-                    has_func.update(chunk)
-                    if f.tell() > 10*1024*1024:
+            hash_func = hashlib.new(algorithm)
+            with open(file_path, 'rb') as f:
+                # Read only first 10 MB for speed
+                for chunk in iter(lambda: f.read(1024 * 1024), b''):
+                    hash_func.update(chunk)
+                    if f.tell() > 10 * 1024 * 1024:  # 10 MB limit
                         break
-            return has_func.hexdigest()
+            return hash_func.hexdigest()
         except Exception as e:
-            logger.error(f"Error calculating hash for file {file_path}: {e}")
+            logger.error(f"Error calculating hash for {file_path}: {e}")
             return None
 
     def _extract_metadata(self, file_path: Path) -> Dict:
+        """Extract metadata from audio file"""
         try:
             audio = mutagen.File(file_path, easy=True)
             if audio is None:
@@ -104,113 +180,211 @@ class DuplicateHandler:
             for field in DUPLICATE_CHECK_FIELDS:
                 if field in audio and audio[field]:
                     metadata[field] = audio[field][0]
-            metadata['size'] = file_path.stat().st_size
-            return metadata
 
+            # Add file size
+            metadata['size'] = file_path.stat().st_size
+
+            return metadata
         except Exception as e:
-            logger.error(f"Error extracting metadata from file {file_path}: {e}")
+            logger.error(f"Error extracting metadata from {file_path}: {e}")
             return {}
 
     def _create_fuzzy_key(self, title: str, artist: str) -> str:
+        """Create fuzzy key for comparison"""
         import re
         title_clean = re.sub(r'[^\w\s]', '', title.lower())
         artist_clean = re.sub(r'[^\w\s]', '', artist.lower())
 
+        # Take first 50 characters
         return f"{artist_clean[:30]}_{title_clean[:50]}"
 
-
     def analyze_duplicates(self, duplicates: Dict[str, List[Path]]) -> List[Dict]:
-        recommendations = []
+        """
+        Analyze duplicates and recommend which file to keep
 
-        for identifier, paths in duplicates.items():
+        Returns:
+            List of recommendations for each duplicate group
+        """
+        logger.info(f"Analyzing {len(duplicates)} duplicate groups")
+
+        recommendations = []
+        total_groups = len(duplicates)
+
+        # Create progress indicator
+        if self.show_progress:
+            progress = get_progress_indicator(
+                total_groups,
+                "Analyzing duplicates",
+                self.use_tqdm
+            )
+        else:
+            progress = None
+
+        for i, (identifier, paths) in enumerate(duplicates.items(), 1):
             files_info = []
 
+            # Analyze each file in the group
             for path in paths:
                 info = {
-                    "path": path,
-                    "size": path.stat().st_size,
-                    "modified": datetime.fromtimestamp(path.stat().st_mtime),
-                    "metadata": self._extract_metadata(path),
-                    "score": 0
+                    'path': path,
+                    'size': path.stat().st_size,
+                    'modified': datetime.fromtimestamp(path.stat().st_mtime),
+                    'metadata': self._extract_metadata(path),
+                    'score': 0
                 }
 
+                # Score the file quality
                 score = 0
 
+                # 1. By size (larger = better quality)
                 if len(paths) > 1:
                     max_size = max(p.stat().st_size for p in paths)
-                    if info["size"] == max_size:
+                    if info['size'] == max_size:
                         score += 10
-                    elif info["size"] > max_size * 0.9:
+                    elif info['size'] > max_size * 0.9:
                         score += 5
                     else:
                         score += 1
 
-                metadata_count = len(info["metadata"])
-                score += min(metadata_count * 2, 20)
+                # 2. By metadata completeness
+                metadata_count = len(info['metadata'])
+                score += min(metadata_count * 2, 20)  # max 20 points
 
+                # 3. By modification date (newer = better)
                 if len(paths) > 1:
                     newest = max(datetime.fromtimestamp(p.stat().st_mtime) for p in paths)
-                    if info["modified"] == newest:
+                    if info['modified'] == newest:
                         score += 5
 
-                info["score"] = score
+                info['score'] = score
                 files_info.append(info)
 
-            files_info.sort(key=lambda x: x["score"], reverse=True)
+            # Sort by score descending
+            files_info.sort(key=lambda x: x['score'], reverse=True)
 
             recommendation = {
-                "identifier": identifier,
-                "keep": files_info[0]["path"],
-                "remove": [info["path"] for info in files_info[1:]],
-                "all_files": paths,
-                "analysis": files_info
+                'identifier': identifier,
+                'keep': files_info[0]['path'],  # recommend keeping the best one
+                'remove': [info['path'] for info in files_info[1:]],  # others to remove
+                'all_files': paths,
+                'analysis': files_info
             }
 
             recommendations.append(recommendation)
 
-            duplicates_logger.info(f"Recommendation for group {identifier[:50]}...:")
+            # Update progress
+            if progress:
+                progress.update(i)
+
+            self._update_progress(i, total_groups, f"Analyzing group {i}/{total_groups}")
+
+            # Log recommendation
+            duplicates_logger.info(f"\nRecommendation for group {identifier[:50]}...")
             duplicates_logger.info(f"  Keep: {recommendation['keep']}")
-            for remove_file in recommendation["remove"]:
+            for remove_file in recommendation['remove']:
                 duplicates_logger.info(f"  Remove: {remove_file}")
 
+        if progress:
+            progress.finish()
+
+        logger.info(f"Analysis complete. Found {len(recommendations)} recommendation groups")
         return recommendations
 
-    def move_duplicates_to_quarantine(self, recommendations: List[Dict], quarantine_dir: Path=None) -> List[Path]:
+    def move_duplicates_to_quarantine(self, recommendations: List[Dict],
+                                      quarantine_dir: Path = None) -> List[Path]:
+        """
+        Move duplicate files to quarantine
+
+        Args:
+            recommendations: List of recommendations from analyze_duplicates
+            quarantine_dir: Directory for quarantine (default: DUPLICATES_DIR)
+
+        Returns:
+            List of moved files
+        """
         if quarantine_dir is None:
-            quarantine_dir = Path(DUPLICATES_DIR) / "quarantine"
+            quarantine_dir = DUPLICATES_DIR / "quarantine"
 
         quarantine_dir.mkdir(parents=True, exist_ok=True)
         moved_files = []
 
+        # Count total files to move
+        total_to_move = sum(len(rec['remove']) for rec in recommendations)
+        logger.info(f"Moving {total_to_move} duplicate files to quarantine")
+
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
+        # Create progress indicator
+        if self.show_progress and total_to_move > 0:
+            progress = get_progress_indicator(
+                total_to_move,
+                "Moving duplicates to quarantine",
+                self.use_tqdm
+            )
+        else:
+            progress = None
+
+        moved_count = 0
         for rec in recommendations:
-            for remove_file in rec["remove"]:
+            for remove_file in rec['remove']:
                 try:
+                    # Create unique name for moved file
                     new_name = f"{timestamp}_{remove_file.name}"
                     dest_path = quarantine_dir / new_name
 
+                    # Save information about origin
                     info_file = quarantine_dir / f"{new_name}.json"
-                    with info_file.open("w", encoding="utf-8") as f:
+                    with open(info_file, 'w', encoding='utf-8') as f:
                         json.dump({
-                            "original_path": str(remove_file),
-                            "original_name": remove_file.name,
-                            "reason": f"Duplicate of {rec['keep'].name}",
-                            "timestamp": timestamp
+                            'original_path': str(remove_file),
+                            'original_name': remove_file.name,
+                            'reason': f"Duplicate of {rec['keep'].name}",
+                            'timestamp': timestamp
                         }, f, indent=2, ensure_ascii=False)
 
+                    # Move file
                     shutil.move(str(remove_file), str(dest_path))
                     moved_files.append(dest_path)
+                    moved_count += 1
 
-                    logger.info(f"Duplicate moved to quarantine: {remove_file} -> {dest_path}")
-                    duplicates_logger.info(f"Duplicate moved: {remove_file}")
+                    logger.info(f"Moved duplicate to quarantine: {remove_file} -> {dest_path}")
+                    duplicates_logger.info(f"Moved duplicate: {remove_file}")
+
+                    # Update progress
+                    if progress:
+                        progress.update(moved_count)
+
+                    self._update_progress(moved_count, total_to_move,
+                                          f"Moving: {remove_file.name}")
+
                 except Exception as e:
-                    logger.error(f"Error while moving file {remove_file}: {e}")
+                    logger.error(f"Error moving {remove_file}: {e}")
+
+        if progress:
+            progress.finish()
+
+        logger.info(f"Moved {len(moved_files)} files to quarantine")
         return moved_files
 
-    def generate_duplicate_report(self, recommendations: List[Dict], report_path: Path = None):
+    def generate_duplicate_report(self, recommendations: List[Dict],
+                                  report_path: Path = None) -> Path:
+        """
+        Generate detailed HTML report about duplicates
+
+        Args:
+            recommendations: List of recommendations from analyze_duplicates
+            report_path: Path to save the report (auto-generated if None)
+
+        Returns:
+            Path to the generated report
+        """
         if report_path is None:
             report_path = DUPLICATES_DIR / f"duplicate_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html"
+
+        logger.info(f"Generating duplicate report: {report_path}")
+
+        if self.show_progress:
+            print("  Generating HTML report...")
 
         html_content = self._generate_html_report(recommendations)
 
@@ -221,60 +395,186 @@ class DuplicateHandler:
         return report_path
 
     def _generate_html_report(self, recommendations: List[Dict]) -> str:
+        """Generate HTML report about duplicates"""
         html = """
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <meta charset="UTF-8">
-            <title>Report on duplicate audio files</title>
-            <style>
-                body {{ font-family: Arial, sans-serif; margin: 20px; }}
-                .duplicate-group {{ border: 1px solid #ddd; margin: 20px 0; padding: 15px; border-radius: 5px; }}
-                .keep {{ background-color: #d4edda; border-left: 4px solid #28a745; }}
-                .remove {{ background-color: #f8d7da; border-left: 4px solid #dc3545; margin: 10px 0; padding: 10px; }}
-                .file-info {{ margin: 5px 0; font-family: monospace; }}
-                .score {{ font-weight: bold; }}
-                h1 {{ color: #333; }}
-                h3 {{ margin-top: 0; }}
-            </style>
-        </head>
-        <body>
-            <h1>Report on duplicate audio files</h1>
-            <p>Generated: {timestamp}</p>
-            <p>Duplicate groups found: {total_groups}</p>
-        """
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Duplicate Audio Files Report</title>
+    <style>
+        body {{ font-family: Arial, sans-serif; margin: 20px; }}
+        .duplicate-group {{ border: 1px solid #ddd; margin: 20px 0; padding: 15px; border-radius: 5px; }}
+        .keep {{ background-color: #d4edda; border-left: 4px solid #28a745; }}
+        .remove {{ background-color: #f8d7da; border-left: 4px solid #dc3545; margin: 10px 0; padding: 10px; }}
+        .file-info {{ margin: 5px 0; font-family: monospace; }}
+        .score {{ font-weight: bold; }}
+        h1 {{ color: #333; }}
+        h3 {{ margin-top: 0; }}
+        .summary {{ background: #f8f9fa; padding: 15px; border-radius: 5px; margin-bottom: 20px; }}
+        .badge {{ display: inline-block; padding: 3px 8px; border-radius: 3px; font-size: 12px; font-weight: bold; }}
+        .badge-keep {{ background: #28a745; color: white; }}
+        .badge-remove {{ background: #dc3545; color: white; }}
+        .file-details {{ margin-left: 20px; }}
+        .metadata {{ font-size: 12px; color: #666; margin-left: 20px; }}
+    </style>
+</head>
+<body>
+    <h1>📊 Duplicate Audio Files Report</h1>
+    <div class="summary">
+        <p><strong>Generated:</strong> {timestamp}</p>
+        <p><strong>Duplicate groups found:</strong> {total_groups}</p>
+        <p><strong>Total files in groups:</strong> {total_files}</p>
+        <p><strong>Recommended to keep:</strong> {keep_files}</p>
+        <p><strong>Recommended to remove:</strong> {remove_files}</p>
+    </div>
+"""
 
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        html = html.format(timestamp=timestamp, total_groups=len(recommendations))
+        total_files = sum(len(rec['all_files']) for rec in recommendations)
+        keep_files = len(recommendations)
+        remove_files = sum(len(rec['remove']) for rec in recommendations)
+
+        html = html.format(
+            timestamp=timestamp,
+            total_groups=len(recommendations),
+            total_files=total_files,
+            keep_files=keep_files,
+            remove_files=remove_files
+        )
 
         for i, rec in enumerate(recommendations, 1):
+            # Information about file recommended to keep
+            keep_info = next(f for f in rec['analysis'] if f['path'] == rec['keep'])
+
             html += f"""
-            <div class="duplicate-group">
-                <h3>Duplicate group #{i}</h3>
-                <div class="keep">
-                    <strong>✓ Keep:</strong>
-                    <div class="file-info">{rec['keep']}</div>
-                    <div class="file-info">Size: {rec['keep'].stat().st_size:,} bytes</div>
-                    <div class="file-info">Score: {rec['analysis'][0]['score']}</div>
+    <div class="duplicate-group">
+        <h3>Duplicate Group #{i}</h3>
+        <div class="keep">
+            <strong>✅ Keep:</strong>
+            <div class="file-details">
+                <div class="file-info">📁 {rec['keep']}</div>
+                <div class="file-info">📦 Size: {rec['keep'].stat().st_size:,} bytes ({rec['keep'].stat().st_size / 1024 / 1024:.2f} MB)</div>
+                <div class="file-info">⭐ Quality score: {keep_info['score']}</div>
+                <div class="metadata">
+                    <strong>Metadata:</strong>
+                    {self._format_metadata(keep_info['metadata'])}
                 </div>
-                <div>
-                    <strong>✗ Remove ({len(rec['remove'])} files):</strong>
-            """
-
-            for remove_file in rec['remove']:
-                html += f"""
-                <div class="remove">
-                    <div class="file-info">{remove_file}</div>
-                    <div class="file-info">Size: {remove_file.stat().st_size:,} bytes</div>
-                    <div class="file-info">Score: {next(f['score'] for f in rec['analysis'] if f['path'] == remove_file)}</div>
-                </div>
-                """
-
-            html += "</div></div>"
-
-        html += """
-        </body>
-        </html>
+            </div>
+        </div>
+        <div style="margin-top: 15px;">
+            <strong>❌ Remove ({len(rec['remove'])} files):</strong>
         """
 
+            for remove_file in rec['remove']:
+                remove_info = next(f for f in rec['analysis'] if f['path'] == remove_file)
+                html += f"""
+            <div class="remove">
+                <div class="file-details">
+                    <div class="file-info">📁 {remove_file}</div>
+                    <div class="file-info">📦 Size: {remove_file.stat().st_size:,} bytes ({remove_file.stat().st_size / 1024 / 1024:.2f} MB)</div>
+                    <div class="file-info">⭐ Quality score: {remove_info['score']}</div>
+                    <div class="metadata">
+                        <strong>Metadata:</strong>
+                        {self._format_metadata(remove_info['metadata'])}
+                    </div>
+                </div>
+            </div>
+            """
+
+            html += """
+        </div>
+    </div>
+    """
+
+        html += """
+    <div style="margin-top: 30px; padding: 15px; background: #fff3cd; border: 1px solid #ffc107; border-radius: 5px;">
+        <h3>⚠️ Instructions for Removing Duplicates</h3>
+        <ol>
+            <li>Verify that all files marked as "Keep" are indeed the best versions</li>
+            <li>Files marked as "Remove" are duplicates and can be safely deleted</li>
+            <li>If you used the --quarantine option, duplicates have been moved to the quarantine folder</li>
+            <li>After verification, you can delete files from quarantine</li>
+        </ol>
+    </div>
+    <div style="margin-top: 20px; color: #666; font-size: 12px;">
+        <p>Report generated automatically. Time: {timestamp}</p>
+    </div>
+</body>
+</html>
+    """.format(timestamp=timestamp)
+
         return html
+
+    def _format_metadata(self, metadata: Dict) -> str:
+        """Format metadata for HTML display"""
+        if not metadata:
+            return "<span style='color: #999;'>No data</span>"
+
+        items = []
+        for key, value in metadata.items():
+            if value:
+                items.append(f"<span style='margin-right: 10px;'><strong>{key}:</strong> {value}</span>")
+
+        if not items:
+            return "<span style='color: #999;'>No data</span>"
+
+        return " ".join(items)
+
+    def process_with_full_progress(self, files: List[Path],
+                                   quarantine: bool = False,
+                                   report_path: Path = None) -> Dict:
+        """
+        Complete duplicate processing pipeline with progress indication
+
+        Args:
+            files: List of files to check for duplicates
+            quarantine: Whether to move duplicates to quarantine
+            report_path: Path to save the report
+
+        Returns:
+            Dictionary with processing results
+        """
+        logger.info(f"Starting full duplicate processing for {len(files)} files")
+
+        # Step 1: Find duplicates
+        duplicates = self.find_duplicates(files)
+
+        if not duplicates:
+            logger.info("No duplicates found")
+            return {
+                'duplicates_found': False,
+                'groups': 0,
+                'files_affected': 0,
+                'recommendations': []
+            }
+
+        # Step 2: Analyze duplicates
+        recommendations = self.analyze_duplicates(duplicates)
+
+        # Step 3: Generate report
+        report_path = self.generate_duplicate_report(recommendations, report_path)
+
+        # Step 4: Move to quarantine if requested
+        moved_files = []
+        if quarantine:
+            moved_files = self.move_duplicates_to_quarantine(recommendations)
+
+        total_files = sum(len(rec['all_files']) for rec in recommendations)
+        keep_files = len(recommendations)
+        remove_files = sum(len(rec['remove']) for rec in recommendations)
+
+        result = {
+            'duplicates_found': True,
+            'groups': len(recommendations),
+            'total_files': total_files,
+            'keep_files': keep_files,
+            'remove_files': remove_files,
+            'recommendations': recommendations,
+            'report_path': report_path,
+            'moved_to_quarantine': len(moved_files),
+            'quarantine_files': moved_files
+        }
+
+        logger.info(f"Processing complete: {result}")
+        return result

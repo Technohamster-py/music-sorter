@@ -1,8 +1,6 @@
-import time
 import sys
-from typing import Optional, Callable
 from datetime import datetime
-from pathlib import Path
+
 
 class ProgressIndicator:
     def __init__(self, total: int, description: str = "Executing..."):
@@ -11,6 +9,21 @@ class ProgressIndicator:
         self.description = description
         self.start_time = datetime.now()
         self.last_update = self.start_time
+
+    def __enter__(self):
+        self.start()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.finish()
+        return False
+
+    def start(self):
+        """Начинает отображение прогресса"""
+        self.start_time = datetime.now()
+        self.current = 0
+        self._is_finished = False
+        self._display()
 
     def update(self, current: int = None, increment: int = 1):
         if current is not None:
@@ -52,6 +65,7 @@ class ProgressIndicator:
         else:
             return f"{remaining / 3600:.1f}h"
 
+
 class SimpleProgressBar(ProgressIndicator):
     def __init__(self, total: int, description: str = "Executing", width: int = 50, show_percentage: bool = True):
         super().__init__(total, description)
@@ -90,27 +104,49 @@ class SimpleProgressBar(ProgressIndicator):
 
 
 class SpinnerIndicator(ProgressIndicator):
-    def __init__(self, description: str = "Executing", spinner_chars: list = None):
-        super().__init__(0, description)
+    def __init__(self, description: str = "Processing",
+                 spinner_chars: list = None, total: int = 0):
+        super().__init__(total, description)
         self.spinner_chars = spinner_chars or ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
+        self._current_spinner = 0
+        self._last_display = ""
+
+    def start(self):
+        super().start()
         self._current_spinner = 0
 
     def update(self, current: int = None, increment: int = 1):
-        super().update(current, increment)
+        if current is not None:
+            self.current = current
+        else:
+            self.current += increment
+        self.last_update = datetime.now()
         self._display()
 
+    def finish(self):
+        if self._is_finished:
+            return
+        self._is_finished = True
+
+        sys.stdout.write('\r' + ' ' * len(self._last_display))
+        sys.stdout.write('\r')
+        sys.stdout.write(f"{self.description} - complete! ({self.current} files)")
+        sys.stdout.flush()
+
     def _display(self):
-        """Отображает спиннер"""
         char = self.spinner_chars[self._current_spinner % len(self.spinner_chars)]
         self._current_spinner += 1
 
         elapsed = self.get_elapsed_time()
-        progress_str = f"{self.current} files" if self.current > 0 else "prepairing..."
+        progress_str = f"{self.current} files" if self.current > 0 else "preparing..."
 
         display = f"{char} {self.description} - {progress_str} (time: {elapsed})"
 
-        sys.stdout.write('\r' + ' ' * len(self._last_display) if hasattr(self, '_last_display') else '')
-        sys.stdout.write('\r')
+        # Очищаем предыдущую строку
+        if hasattr(self, '_last_display') and self._last_display:
+            sys.stdout.write('\r' + ' ' * len(self._last_display))
+            sys.stdout.write('\r')
+
         sys.stdout.write(display)
         sys.stdout.flush()
 
@@ -118,7 +154,7 @@ class SpinnerIndicator(ProgressIndicator):
 
 
 class ProgressWithLogging(ProgressIndicator):
-    def __init__(self, total: int, description: str = "Executing",
+    def __init__(self, total: int, description: str = "Processing",
                  logger=None, log_interval: int = 10):
         super().__init__(total, description)
         self.logger = logger
@@ -128,11 +164,16 @@ class ProgressWithLogging(ProgressIndicator):
     def update(self, current: int = None, increment: int = 1):
         super().update(current, increment)
 
-        # Логируем каждые log_interval шагов
         if self.logger and (self.current - self._last_logged) >= self.log_interval:
             self._last_logged = self.current
             progress = (self.current / self.total * 100) if self.total > 0 else 0
             self.logger.info(f"Progress: {self.current}/{self.total} ({progress:.1f}%)")
+
+    def _display(self):
+        if self.total > 0:
+            progress = self.current / self.total * 100
+            sys.stdout.write(f"\r{self.description}: {self.current}/{self.total} ({progress:.1f}%)")
+            sys.stdout.flush()
 
 
 class MultiProgressManager:
@@ -146,14 +187,18 @@ class MultiProgressManager:
     def start_indicator(self, index: int = 0):
         if index < len(self.indicators):
             self.current_indicator = self.indicators[index]
-            self.current_indicator.update(0)
+            self.current_indicator.start()
+
+    def update_current(self, current: int = None, increment: int = 1):
+        if self.current_indicator:
+            self.current_indicator.update(current, increment)
 
     def finish_all(self):
         for indicator in self.indicators:
             indicator.finish()
 
 
-def get_progress_indicator(total: int, description: str = "Executing",
+def get_progress_indicator(total: int, description: str = "Processing",
                            use_tqdm: bool = True) -> ProgressIndicator:
     try:
         if use_tqdm:
@@ -165,8 +210,9 @@ def get_progress_indicator(total: int, description: str = "Executing",
 
 
 class TqdmWrapper(ProgressIndicator):
-    def __init__(self, total: int, description: str = "Executing"):
+    def __init__(self, total: int, description: str = "Processing"):
         super().__init__(total, description)
+        self.tqdm = None
         try:
             from tqdm import tqdm
             self.tqdm = tqdm(
@@ -177,7 +223,14 @@ class TqdmWrapper(ProgressIndicator):
                 bar_format="{desc}: {percentage:3.1f}%|{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]"
             )
         except ImportError:
-            self.tqdm = None
+            pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.finish()
+        return False
 
     def update(self, current: int = None, increment: int = 1):
         super().update(current, increment)
@@ -193,12 +246,11 @@ class TqdmWrapper(ProgressIndicator):
             self.tqdm.close()
 
     def _display(self):
-        # tqdm сам управляет отображением
         pass
 
 
 class ProgressContext:
-    def __init__(self, total: int, description: str = "Executing",
+    def __init__(self, total: int, description: str = "Выполняется",
                  logger=None, use_tqdm: bool = True):
         self.total = total
         self.description = description
@@ -210,12 +262,17 @@ class ProgressContext:
         self.indicator = get_progress_indicator(
             self.total, self.description, self.use_tqdm
         )
+        self.indicator.start()
         return self.indicator
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         if self.indicator:
             self.indicator.finish()
 
-        # Логируем завершение
         if self.logger and not exc_type:
-            self.logger.info(f"Completed: {self.description} - {self.total} files")
+            self.logger.info(f"Complete: {self.description} - {self.total} files")
+        return False
+
+
+def progress(total: int, description: str = "Выполняется", use_tqdm: bool = True):
+    return ProgressContext(total, description, use_tqdm=use_tqdm)

@@ -1,56 +1,72 @@
+"""Command-line interface for the music metadata utility"""
 import argparse
 import sys
 from pathlib import Path
-from urllib import response
-from xml.sax import handler
 
 from audio_processor import AudioProcessor
 from file_organizer import FileOrganizer
 from logger_config import get_logger
+from progress_indicator import SpinnerIndicator, SimpleProgressBar
 
 logger = get_logger(__name__)
 
+
 def main():
-    parser = argparse.ArgumentParser(description="A utility for working with audio file metadata",
-                                     formatter_class=argparse.RawDescriptionHelpFormatter,
-                                     epilog="""
-                                            Usage examples:
-                                            # Set an artist for all files in a folder
-                                              python cli.py set-artist -f /path/to/music -a "The Beatles"
-                                            
-                                            # Organize files by folders (artist/album)
-                                            python cli.py organize -s /path/to/source -t /path/to/target
-                                            
-                                            # Find and process duplicates
-                                              python cli.py find-duplicates -f /path/to/music
-                                            
-                                            # Preview (dry run)
-                                            python cli.py organize -s /path/to/source -t /path/to/target --dry-run 
-                                     """)
+    """Main entry point for the CLI"""
+    parser = argparse.ArgumentParser(
+        description='Music Metadata Tool - Process and organize audio files',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Set artist for all files in a folder
+  python cli.py set-artist -f /path/to/music -a "The Beatles"
+  
+  # Organize files into folders (artist/album)
+  python cli.py organize -s /path/to/source -t /path/to/target
+  
+  # Find and process duplicates
+  python cli.py find-duplicates -f /path/to/music
+  
+  # Preview mode (dry run)
+  python cli.py organize -s /path/to/source -t /path/to/target --dry-run
+  
+  # Disable progress bar (for scripts)
+  python cli.py set-artist -f /path/to/music -a "Queen" --no-progress
+        """
+    )
 
-    subparsers = parser.add_subparsers(dest="command", help="command")
+    # Global options for all commands
+    parser.add_argument('--no-progress', action='store_true', help='Disable progress indicators')
+    parser.add_argument('--no-tqdm', action='store_true', help='Use simple progress bar instead of tqdm')
 
-    set_artist_parser = subparsers.add_parser("set-artist", help="Set an artist")
-    set_artist_parser.add_argument("-f", '--folder', required=True, help="Path to the music folder")
-    set_artist_parser.add_argument("-a", '--artist', required=True, help="Artist name")
-    set_artist_parser.add_argument('-r', '--recursive', action='store_true', help="Recursive mode")
-    set_artist_parser.add_argument('--dry-run', action='store_true', help="Show what would be done")
-    set_artist_parser.add_argument('--no-backup', action='store_true', help="Don't create backups")
+    subparsers = parser.add_subparsers(dest='command', help='Command to execute')
 
-    organize_parser = subparsers.add_parser("organize", help="Organize files")
-    organize_parser.add_argument("-s" '--source', required=True, help="Path to the music folder")
-    organize_parser.add_argument("-t", '--target', required=True, help="Target folder")
-    organize_parser.add_argument("--no-duplicates", action='store_true', help="Don't process duplicate files")
-    organize_parser.add_argument('--dry-run', action='store_true', help="Show what would be done")
-    organize_parser.add_argument('--no-backup', action='store_true', help="Don't create backups")
+    # Command: set-artist
+    set_artist_parser = subparsers.add_parser('set-artist', help='Set artist for audio files')
+    set_artist_parser.add_argument('-f', '--folder', required=True, help='Path to folder with music')
+    set_artist_parser.add_argument('-a', '--artist', required=True, help='Artist name to set')
+    set_artist_parser.add_argument('-r', '--recursive', action='store_true', help='Process subdirectories recursively')
+    set_artist_parser.add_argument('--dry-run', action='store_true', help='Preview changes without applying them')
+    set_artist_parser.add_argument('--no-backup', action='store_true', help='Skip creating backup files')
+    set_artist_parser.add_argument('--spinner', action='store_true', help='Use spinner instead of progress bar')
 
-    duplicates_parser = subparsers.add_parser("find-duplicates", help="Find duplicate files")
-    duplicates_parser.add_argument("-f", "--folder", required=True, help="Path to the music folder")
-    duplicates_parser.add_argument("--report", help="Save report to file")
-    duplicates_parser.add_argument('--quarantine', action='store_true', help="Move duplicate files to quarantine")
+    # Command: organize
+    organize_parser = subparsers.add_parser('organize', help='Organize files by metadata')
+    organize_parser.add_argument('-s', '--source', required=True, help='Source directory')
+    organize_parser.add_argument('-t', '--target', required=True, help='Target directory')
+    organize_parser.add_argument('--no-duplicates', action='store_true', help='Skip duplicate handling')
+    organize_parser.add_argument('--dry-run', action='store_true', help='Preview changes without applying them')
+    organize_parser.add_argument('--no-backup', action='store_true', help='Skip creating backup files')
 
-    clean_parser = subparsers.add_parser("clean-backups", help="Remove backups")
-    clean_parser.add_argument("-f", "--folder", required=True, help="Path to folder (recursive)")
+    # Command: find-duplicates
+    duplicates_parser = subparsers.add_parser('find-duplicates', help='Find duplicate files')
+    duplicates_parser.add_argument('-f', '--folder', required=True, help='Path to folder')
+    duplicates_parser.add_argument('--report', help='Save report to specific file')
+    duplicates_parser.add_argument('--quarantine', action='store_true', help='Move duplicates to quarantine')
+
+    # Command: clean-backups
+    clean_parser = subparsers.add_parser('clean-backups', help='Remove backup files')
+    clean_parser.add_argument('-f', '--folder', help='Path to folder (recursive)')
 
     args = parser.parse_args()
 
@@ -71,116 +87,236 @@ def main():
             parser.print_help()
             sys.exit(1)
 
-
     except KeyboardInterrupt:
-        logger.info(f"Operation interrupted by user")
+        print("\n\n⚠️  Operation cancelled by user")
+        logger.info("Operation cancelled by user")
         sys.exit(0)
-
     except Exception as e:
         logger.error(f"Critical error: {e}", exc_info=True)
+        print(f"\n❌ Error: {e}")
         sys.exit(1)
+
 
 def cmd_set_artist(args):
+    """Handle set-artist command"""
     folder = Path(args.folder)
     if not folder.exists():
-        logger.error(f"Folder {folder} does not exist")
+        print(f"❌ Folder does not exist: {folder}")
+        logger.error(f"Folder does not exist: {folder}")
         sys.exit(1)
 
-    processor = AudioProcessor(dry_run=args.dry_run, backup=not args.no_backup)
-    processed, errors = processor.set_artist_in_folder(foler_path=folder, artist_name=args.artist, recursive=args.recursive)
+    print(f"\n🎵 Processing folder: {folder}")
+    print(f"📝 Setting artist: {args.artist}")
+    if args.dry_run:
+        print("🔍 DRY RUN MODE (changes will not be applied)")
+
+    processor = AudioProcessor(
+        dry_run=args.dry_run,
+        backup=not args.no_backup,
+        show_progress=not args.no_progress,
+        use_tqdm=not args.no_tqdm
+    )
+
+    if args.spinner:
+        processed, errors = processor.set_artist_with_spinner(
+            folder_path=folder,
+            artist_name=args.artist,
+            recursive=args.recursive
+        )
+    else:
+        processed, errors = processor.set_artist_in_folder(
+            folder_path=folder,
+            artist_name=args.artist,
+            recursive=args.recursive
+        )
+
+    # Display results
+    print(f"\n📊 Results:")
+    print(f"  ✅ Successfully processed: {processed}")
+    if errors > 0:
+        print(f"  ❌ Errors: {errors}")
+    if args.dry_run:
+        print("  🔍 Mode: DRY RUN (changes not applied)")
 
     if not args.dry_run and processor.backup_files:
-        print(f"\nCreated {len(processor.backup_files)} backup file(s)")
-        print("To remove backups execute: python cli.py clean-backups -f <your/folder>")
+        print(f"\n💾 Created {len(processor.backup_files)} backup files")
+        print("   To remove backups: python cli.py clean-backups -f <folder>")
+
+    if errors == 0 and processed > 0:
+        print("\n✅ Operation completed successfully!")
+    elif errors > 0:
+        print(f"\n⚠️  Operation completed with {errors} errors. Check the log.")
+
 
 def cmd_organize(args):
+    """Handle organize command"""
     source = Path(args.source)
     target = Path(args.target)
 
     if not source.exists():
-        logger.error(f"Source folder {source} does not exist")
+        print(f"❌ Source folder does not exist: {source}")
+        logger.error(f"Source folder does not exist: {source}")
         sys.exit(1)
 
-    organizer = FileOrganizer(dry_run=args.dry_run, bakup=not args.no_backup)
-
-    result = organizer.organize_by_metadata(source_dir=source, target_dir=target, handle_duplicates=not args.no_duplicates)
-
-    print(f"\nOrganisation result")
-    print(f"\tFiles found: {result['total_found']}")
-    print(f"\tOrganized files: {result['organized']}")
-    print(f"\tErrors: {result['errors']}")
+    print(f"\n📁 Organizing files")
+    print(f"  📂 Source: {source}")
+    print(f"  📂 Target: {target}")
     if args.dry_run:
-        print("\nThis is a DRY RUN; changes are NOT committed")
+        print("  🔍 DRY RUN MODE (changes will not be applied)")
+
+    organizer = FileOrganizer(
+        dry_run=args.dry_run,
+        backup=not args.no_backup,
+        show_progress=not args.no_progress,
+        use_tqdm=not args.no_tqdm
+    )
+
+    result = organizer.organize_by_metadata(
+        source_dir=source,
+        target_dir=target,
+        handle_duplicates=not args.no_duplicates
+    )
+
+    # Display results
+    print(f"\n📊 Organization results:")
+    print(f"  📁 Files found: {result['total_found']}")
+    print(f"  ✅ Organized: {result['organized']}")
+    if result['errors'] > 0:
+        print(f"  ❌ Errors: {result['errors']}")
+    if args.dry_run:
+        print("  🔍 Mode: DRY RUN (changes not applied)")
+
+    if result['organized'] > 0 and result['errors'] == 0:
+        print("\n✅ Organization completed successfully!")
+    elif result['errors'] > 0:
+        print(f"\n⚠️  Organization completed with {result['errors']} errors. Check the log.")
+
 
 def cmd_find_duplicates(args):
+    """Handle find-duplicates command"""
     folder = Path(args.folder)
     if not folder.exists():
-        logger.error(f"Folder {folder} does not exist")
+        print(f"❌ Folder does not exist: {folder}")
+        logger.error(f"Folder does not exist: {folder}")
         sys.exit(1)
 
+    print(f"\n🔍 Searching for duplicates in: {folder}")
+
     from duplicate_handler import DuplicateHandler
-    handler = DuplicateHandler()
 
-    audio_files = [f for f in folder.rglob('*') if f.suffix.lower() in {'.mp3', '.flac', '.m4a', '.ogg', '.opus'}]
+    handler = DuplicateHandler(
+        show_progress=not args.no_progress,
+        use_tqdm=not args.no_tqdm
+    )
+
+    # Find all audio files
+    print("  📂 Scanning files...")
+    with SpinnerIndicator("Searching for audio files") as spinner:
+        audio_files = [f for f in folder.rglob('*')
+                       if f.suffix.lower() in {'.mp3', '.flac', '.m4a', '.ogg', '.opus'}]
+        spinner.update(len(audio_files))
+
     if not audio_files:
-        logger.info(f"No audio files found in folder {folder}")
+        print("❌ No audio files found")
         return
 
-    logger.info(f"Found {len(audio_files)} audio file(s)")
+    print(f"  📁 Found files: {len(audio_files)}")
 
+    # Find duplicates
+    print("  🔍 Finding duplicates...")
     duplicates = handler.find_duplicates(audio_files)
+
     if not duplicates:
-        logger.info(f"No duplicate files found in folder {folder}")
+        print("✅ No duplicates found!")
         return
 
-    logger.info(f"Found {len(duplicates)} froups of duplicate file(s)")
-    recomendations = handler.analyze_duplicates(duplicates)
+    print(f"  📊 Found {len(duplicates)} duplicate groups")
 
-    report_path = handler.generate_duplicate_report(recomendations)
-    logger.info(f"Generated report at {report_path}")
+    # Analyze duplicates
+    print("  📊 Analyzing duplicates...")
+    recommendations = handler.analyze_duplicates(duplicates)
+
+    # Save report
+    print("  💾 Saving report...")
+    if args.report:
+        report_path = Path(args.report)
+    else:
+        report_path = None
+    report_path = handler.generate_duplicate_report(recommendations, report_path)
+    print(f"  📄 Report saved: {report_path}")
+
+    # Move to quarantine if requested
+    if args.quarantine:
+        print("  📦 Moving duplicates to quarantine...")
+        moved = handler.move_duplicates_to_quarantine(recommendations)
+        print(f"  📦 Moved to quarantine: {len(moved)} files")
+
+    # Display statistics
+    total_files = sum(len(rec['all_files']) for rec in recommendations)
+    keep_files = len(recommendations)
+    remove_files = sum(len(rec['remove']) for rec in recommendations)
+
+    print(f"\n📊 Duplicate statistics:")
+    print(f"  📁 Total files in groups: {total_files}")
+    print(f"  ✅ Recommended to keep: {keep_files}")
+    print(f"  ❌ Recommended to remove: {remove_files}")
 
     if args.quarantine:
-        moved = handler.move_duplicates_to_quarantine(recomendations)
-        logger.info(f"Moved to quarantine {len(moved)} duplicate file(s)")
+        print(f"\n📦 Duplicates moved to quarantine in: logs/duplicates/quarantine")
+        print("   Verify them before permanent deletion")
+    else:
+        print(f"\n💡 To move duplicates to quarantine, use: --quarantine")
 
-    total_files = sum(len(rec['all_files']) for rec in recomendations)
-    keep_files = len(recomendations)
-    remove_files = sum(len(rec['remove']) for rec in recomendations)
+    print(f"\n📄 Detailed report: {report_path}")
 
-    print(f"\nDuplicate statistics:")
-    print(f"\tTotal files: {total_files} in groups")
-    print(f"\tRecommended to keep: {keep_files}")
-    print(f"\tRecommended to delete / move: {remove_files}")
 
 def cmd_clean_backups(args):
+    """Handle clean-backups command"""
     if args.folder:
         folder = Path(args.folder)
         if not folder.exists():
-            logger.error(f"Folder {folder} does not exist")
+            print(f"❌ Folder does not exist: {folder}")
+            logger.error(f"Folder does not exist: {folder}")
             sys.exit(1)
 
-        backup_files = list(folder.rglob('*.backup'))
+        print(f"\n🧹 Searching for backup files in: {folder}")
+
+        # Find backup files
+        with SpinnerIndicator("Searching for .backup files") as spinner:
+            backup_files = list(folder.rglob('*.backup'))
+            spinner.update(len(backup_files))
+
         if not backup_files:
-            logger.info(f"No backup files found in folder {folder}")
+            print("✅ No backup files found")
             return
 
-        logger.info(f"Found {len(backup_files)} backup files")
-        response = input("\nDelete all backups? (y/n) ")
+        print(f"  📁 Found {len(backup_files)} backup files")
+
+        # Show a few examples
+        for backup in backup_files[:5]:
+            print(f"    - {backup}")
+        if len(backup_files) > 5:
+            print(f"    ... and {len(backup_files) - 5} more files")
+
+        response = input("\nDelete all backup files? (y/N): ")
 
         if response.lower() == 'y':
-            for backup in backup_files:
-                try:
-                    backup.unlink()
-                    logger.info(f"Deleted {backup}")
-                except Exception as e:
-                    logger.error(f"Error while deleting backup {backup}")
-            logger.info("All backups deleted")
+            print("  🗑️  Deleting...")
+            with SimpleProgressBar(len(backup_files), "Deleting") as prog:
+                for i, backup in enumerate(backup_files, 1):
+                    try:
+                        backup.unlink()
+                        logger.info(f"Deleted: {backup}")
+                    except Exception as e:
+                        logger.error(f"Error deleting {backup}: {e}")
+                    prog.update(i)
+            print(f"\n✅ Deleted {len(backup_files)} backup files")
         else:
-            logger.info("Operation cancelled")
-
+            print("❌ Operation cancelled")
     else:
-        logger.info(f"To remove all backups execute: python cli.py clean-backups --folder <your/folder>")
+        print("\n⚠️  Specify a folder to clean backups: --folder <path>")
+        print("   Example: python cli.py clean-backups -f /path/to/music")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
