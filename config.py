@@ -29,7 +29,7 @@ DUPLICATE_CHECK_FIELDS = ['title', 'artist', 'duration']  # Fields to compare
 DUPLICATE_MATCH_THRESHOLD = 0.9  # Similarity threshold for fuzzy matching
 
 # Organization settings
-ORGANIZE_PATTERN = "{artist}/{album}/{track:02d} - {title}{ext}"  # Path pattern
+ORGANIZE_PATTERN = "{artist}/{album}/{track} - {title}{ext}"  # Path pattern
 DEFAULT_ARTIST = "Unknown Artist"
 DEFAULT_ALBUM = "Unknown Album"
 
