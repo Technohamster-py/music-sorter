@@ -1,6 +1,8 @@
 """Configuration for the music metadata utility"""
 import os
 from pathlib import Path
+from datetime import datetime
+import sys
 
 # Base paths
 BASE_DIR = Path(__file__).parent
@@ -64,3 +66,16 @@ TAG_MAPPING = {
         'year': 'date'
     }
 }
+
+# Fix encoding for Windows console
+if sys.platform == 'win32':
+    import locale
+    # Force UTF-8 for console output on Windows
+    try:
+        sys.stdout.reconfigure(encoding='utf-8')
+        sys.stderr.reconfigure(encoding='utf-8')
+    except (AttributeError, TypeError):
+        # For older Python versions
+        import io
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')

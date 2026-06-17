@@ -4,6 +4,7 @@ from pathlib import Path
 from datetime import datetime
 from typing import List, Dict, Optional, Callable
 import mutagen
+import sys
 from config import ORGANIZE_PATTERN, DEFAULT_ARTIST, DEFAULT_ALBUM
 from logger_config import get_logger
 from duplicate_handler import DuplicateHandler
@@ -56,6 +57,85 @@ class FileOrganizer:
         """Update progress via callback if set"""
         if self.progress_callback:
             self.progress_callback(current, total, description)
+
+    def _fix_encoding(self, text: str) -> str:
+        """
+        Fix common encoding issues in text
+
+        Args:
+            text: Text that might have encoding issues
+
+        Returns:
+            Fixed text
+        """
+        if not text:
+            return text
+
+        try:
+            # Try to detect if text is misencoded
+            # Common pattern: Windows-1251 text interpreted as UTF-8
+            # Example: "Äåíü Âûáîðîâ" -> "День Выборов"
+
+            # First, try to encode as latin-1 and decode as utf-8
+            # This fixes the most common encoding issues
+            try:
+                fixed = text.encode('latin-1').decode('utf-8')
+                # If the result contains cyrillic characters, it's likely fixed
+                import re
+                if re.search(r'[а-яА-Я]', fixed):
+                    return fixed
+            except (UnicodeEncodeError, UnicodeDecodeError):
+                pass
+
+            # Try Windows-1251
+            try:
+                fixed = text.encode('latin-1').decode('windows-1251')
+                import re
+                if re.search(r'[а-яА-Я]', fixed):
+                    return fixed
+            except (UnicodeEncodeError, UnicodeDecodeError):
+                pass
+
+            # Try UTF-8 with replacement
+            try:
+                return text.encode('utf-8', errors='replace').decode('utf-8')
+            except:
+                pass
+
+            # If all else fails, return as is
+            return text
+
+        except Exception as e:
+            logger.debug(f"Error fixing encoding for '{text}': {e}")
+            return text
+
+    def _sanitize_filename(self, filename: str) -> str:
+        """
+        Sanitize filename by removing invalid characters
+
+        Args:
+            filename: Filename to sanitize
+
+        Returns:
+            Sanitized filename
+        """
+        if not filename:
+            return "untitled"
+
+        # First, fix encoding issues
+        filename = self._fix_encoding(filename)
+
+        import re
+        # Replace invalid characters with _
+        filename = re.sub(r'[<>:"/\\|?*]', '_', filename)
+        # Remove extra spaces
+        filename = ' '.join(filename.split())
+        # Remove leading/trailing spaces and dots
+        filename = filename.strip('. ')
+        # Limit length (Windows has 255 char limit)
+        if len(filename) > 200:
+            filename = filename[:200]
+        return filename or "untitled"
 
     def organize_by_metadata(self, source_dir: Path, target_dir: Path,
                            handle_duplicates: bool = True) -> Dict:
@@ -210,12 +290,10 @@ class FileOrganizer:
                 logger.warning(f"Target file already exists: {target_path}")
                 # Add a suffix to avoid overwriting
                 counter = 1
+                stem = target_path.stem
+                suffix = target_path.suffix
                 while target_path.exists():
-                    stem = target_path.stem
-                    # Remove existing counter if present
-                    import re
-                    stem_clean = re.sub(r'_\d+$', '', stem)
-                    new_name = f"{stem_clean}_{counter}{target_path.suffix}"
+                    new_name = f"{stem}_{counter}{suffix}"
                     target_path = target_path.parent / new_name
                     counter += 1
                 logger.info(f"Using alternative name: {target_path.name}")
@@ -243,10 +321,13 @@ class FileOrganizer:
         Returns:
             Dictionary with fallback metadata
         """
+        # Fix encoding of filename
+        clean_name = self._fix_encoding(file_path.stem)
+
         return {
             'artist': DEFAULT_ARTIST,
             'album': DEFAULT_ALBUM,
-            'title': file_path.stem,
+            'title': clean_name,
             'track': 0,
             'ext': file_path.suffix
         }
@@ -268,14 +349,19 @@ class FileOrganizer:
                 return None
 
             # Try to get metadata, using defaults if missing
-            artist = audio.get('artist', [DEFAULT_ARTIST])[0] or DEFAULT_ARTIST
-            album = audio.get('album', [DEFAULT_ALBUM])[0] or DEFAULT_ALBUM
-            title = audio.get('title', [file_path.stem])[0] or file_path.stem
+            artist_raw = audio.get('artist', [DEFAULT_ARTIST])[0] or DEFAULT_ARTIST
+            album_raw = audio.get('album', [DEFAULT_ALBUM])[0] or DEFAULT_ALBUM
+            title_raw = audio.get('title', [file_path.stem])[0] or file_path.stem
+
+            # Fix encoding issues
+            artist = self._fix_encoding(str(artist_raw))
+            album = self._fix_encoding(str(album_raw))
+            title = self._fix_encoding(str(title_raw))
 
             # Sanitize filenames
-            artist = self._sanitize_filename(str(artist))
-            album = self._sanitize_filename(str(album))
-            title = self._sanitize_filename(str(title))
+            artist = self._sanitize_filename(artist)
+            album = self._sanitize_filename(album)
+            title = self._sanitize_filename(title)
 
             # Extract track number
             track = audio.get('track', ['0'])[0]
@@ -283,7 +369,7 @@ class FileOrganizer:
 
             # Ensure we have at least the title
             if not title or title == '':
-                title = file_path.stem
+                title = self._fix_encoding(file_path.stem)
 
             return {
                 'artist': artist or DEFAULT_ARTIST,
@@ -295,25 +381,6 @@ class FileOrganizer:
         except Exception as e:
             logger.error(f"Error extracting metadata from {file_path.name}: {e}")
             return None
-
-    def _sanitize_filename(self, filename: str) -> str:
-        """
-        Sanitize filename by removing invalid characters
-
-        Args:
-            filename: Filename to sanitize
-
-        Returns:
-            Sanitized filename
-        """
-        import re
-        # Replace invalid characters with _
-        filename = re.sub(r'[<>:"/\\|?*]', '_', filename)
-        # Remove extra spaces
-        filename = ' '.join(filename.split())
-        # Remove leading/trailing spaces and dots
-        filename = filename.strip('. ')
-        return filename or "untitled"
 
     def _extract_track_number(self, track_str: str) -> Optional[int]:
         """
@@ -349,9 +416,9 @@ class FileOrganizer:
             track_str = f"{metadata.get('track', 0):02d}" if metadata.get('track', 0) > 0 else ""
 
             # Ensure we have all required fields
-            artist = metadata.get('artist', DEFAULT_ARTIST) or DEFAULT_ARTIST
-            album = metadata.get('album', DEFAULT_ALBUM) or DEFAULT_ALBUM
-            title = metadata.get('title', file_path.stem) or file_path.stem
+            artist = self._fix_encoding(metadata.get('artist', DEFAULT_ARTIST) or DEFAULT_ARTIST)
+            album = self._fix_encoding(metadata.get('album', DEFAULT_ALBUM) or DEFAULT_ALBUM)
+            title = self._fix_encoding(metadata.get('title', file_path.stem) or file_path.stem)
             ext = metadata.get('ext', file_path.suffix) or file_path.suffix
 
             # Sanitize again for safety
@@ -384,7 +451,8 @@ class FileOrganizer:
             # Ensure target_name is not empty
             if not target_name:
                 logger.warning(f"Empty target name for {file_path.name}, using fallback")
-                target_name = f"{DEFAULT_ARTIST}/{DEFAULT_ALBUM}/{file_path.stem}{file_path.suffix}"
+                clean_name = self._fix_encoding(file_path.stem)
+                target_name = f"{DEFAULT_ARTIST}/{DEFAULT_ALBUM}/{clean_name}{file_path.suffix}"
 
             return target_dir / target_name
 
